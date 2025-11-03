@@ -17,10 +17,21 @@ load_dotenv()
 # Windows encoding ve terminal düzeltmesi (exe çıktısı için)
 if sys.platform == 'win32':
     import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
-    # Terminal genişliğini ayarla
-    os.system('mode con: cols=80 lines=30')
+    # EXE modunda stdout.buffer None olabilir, kontrol et
+    try:
+        if hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None:
+            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+        if hasattr(sys.stderr, 'buffer') and sys.stderr.buffer is not None:
+            sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+    except (AttributeError, OSError):
+        # EXE modunda veya buffer yoksa, normal stdout kullan
+        pass
+    # Terminal genişliğini ayarla (sadece konsol modunda)
+    try:
+        if hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None:
+            os.system('mode con: cols=80 lines=30')
+    except:
+        pass
 
 # `colorama`'yı başlatıyoruz
 init(autoreset=True)
@@ -117,6 +128,78 @@ today_date = datetime.now().strftime("%d.%m.%Y")
 
 # API URL'si
 url = "https://ebebek.wawlabs.com/autocomplete"
+
+# --- Saf işlevler (GUI tarafından da kullanılacak) ---
+def validate_barkodsuz(barkod):
+    if not barkod or not barkod.isdigit():
+        return False, "Barkod yalnızca rakamlardan oluşmalıdır."
+    if len(barkod) not in [11, 13]:
+        return False, "Barkod 11 veya 13 haneli olmalıdır."
+    return True, ""
+
+def validate_kayitsiz(barkod):
+    if not barkod or not barkod.startswith("EBHJ"):
+        return False, "Barkod 'EBHJ' ile başlamalıdır."
+    if len(barkod) != 14:
+        return False, "Barkod 14 karakter olmalıdır."
+    return True, ""
+
+def format_brand_name(brand_name):
+    """Marka adının her kelimesinin baş harfini büyük yapar"""
+    if not brand_name:
+        return ""
+    # Her kelimenin ilk harfini büyük yap
+    return " ".join(word.capitalize() for word in str(brand_name).split())
+
+def query_product(barkod, timeout=5):
+    try:
+        response = requests.get(f"{url}?q={barkod}", timeout=timeout)
+        if response.status_code == 200:
+            data = response.json()
+            products = data.get("products") or []
+            return products[0] if products else None
+        return None
+    except Exception:
+        return None
+
+def add_barkodsuz(barkod, product):
+    brand = product.get("brand", "Marka bulunamadı") if product else "Bilinmiyor"
+    # Marka adını formatla
+    brand = format_brand_name(brand)
+    product_name = product.get("title", "Ürün adı bulunamadı") if product else "Bilinmiyor"
+    if barkod in barkodsuz_dict:
+        barkodsuz_dict[barkod]["ADET"] += 1
+    else:
+        barkodsuz_dict[barkod] = {"TARİH": today_date, "İÇERİK": f"{brand} - {product_name}", "ADET": 1}
+    return barkodsuz_dict[barkod]["ADET"]
+
+def add_hasarli(barkod, product):
+    brand = product.get("brand", "Marka bulunamadı") if product else "Bilinmiyor"
+    # Marka adını formatla
+    brand = format_brand_name(brand)
+    product_name = product.get("title", "Ürün adı bulunamadı") if product else "Bilinmiyor"
+    if barkod in hasarli_dict:
+        hasarli_dict[barkod]["ADET"] += 1
+    else:
+        hasarli_dict[barkod] = {"TARİH": today_date, "İÇERİK": f"{brand} - {product_name}", "ADET": 1}
+    return hasarli_dict[barkod]["ADET"]
+
+def add_kayitsiz(barkod):
+    if barkod in kayıtsız_list:
+        return False
+    kayıtsız_list.append(barkod)
+    return True
+
+def get_stats():
+    barkodsuz_say = len(barkodsuz_dict)
+    kayitsiz_say = len(kayıtsız_list)
+    hasarli_say = len(hasarli_dict)
+    return {
+        "barkodsuz": barkodsuz_say,
+        "kayitsiz": kayitsiz_say,
+        "hasarli": hasarli_say,
+        "toplam": barkodsuz_say + kayitsiz_say + hasarli_say,
+    }
 
 # Benzersiz dosya adı oluşturma fonksiyonu
 def get_unique_filename():
@@ -300,133 +383,141 @@ def hasarlilar():
 
 # Excel dosyasına veri kaydetme
 def save_to_excel():
-    if not barkodsuz_dict and not kayıtsız_list and not hasarli_dict:
-        print(Fore.YELLOW + "\n    ⚠️  Hiç veri girilmedi! Excel dosyası oluşturulmadı.")
-        return
+    try:
+        if not barkodsuz_dict and not kayıtsız_list and not hasarli_dict:
+            print(Fore.YELLOW + "\n    ⚠️  Hiç veri girilmedi! Excel dosyası oluşturulmadı.")
+            return
 
-    file_name = get_unique_filename()
-    
-    wb = Workbook()
-    wb.remove(wb.active)
+        file_name = get_unique_filename()
+        
+        wb = Workbook()
+        wb.remove(wb.active)
 
-    header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    subheader_fill = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
-    header_font = Font(bold=True, size=12)
-    border = Border(left=Side(style='thin'), right=Side(style='thin'),
-                   top=Side(style='thin'), bottom=Side(style='thin'))
-    center_align = Alignment(horizontal="center", vertical="center")
+        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        subheader_fill = PatternFill(start_color="00B0F0", end_color="00B0F0", fill_type="solid")
+        header_font = Font(bold=True, size=12)
+        border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                       top=Side(style='thin'), bottom=Side(style='thin'))
+        center_align = Alignment(horizontal="center", vertical="center")
 
-    # 1. BARKODSUZLAR
-    if barkodsuz_dict:
-        ws1 = wb.create_sheet("BARKODSUZLAR")
-        ws1.merge_cells('A1:C1')
-        ws1['A1'] = "EBEBEK BARKODSUZLAR ŞABLONU"
-        ws1['A1'].fill = header_fill
-        ws1['A1'].font = header_font
-        ws1['A1'].alignment = center_align
-        
-        ws1['A2'] = "TARİH"
-        ws1['B2'] = "İÇERİK"
-        ws1['C2'] = "ADET"
-        for cell in ['A2', 'B2', 'C2']:
-            ws1[cell].fill = subheader_fill
-            ws1[cell].font = Font(bold=True)
-            ws1[cell].alignment = center_align
-        
-        row = 3
-        for barkod, data in barkodsuz_dict.items():
-            ws1[f'A{row}'] = data['TARİH']
-            ws1[f'B{row}'] = data['İÇERİK']
-            ws1[f'C{row}'] = data['ADET']
-            ws1[f'C{row}'].alignment = center_align
-            row += 1
-        
-        for row in ws1.iter_rows(min_row=1, max_row=ws1.max_row, min_col=1, max_col=3):
-            for cell in row:
-                cell.border = border
-        
-        ws1.column_dimensions['A'].width = 12
-        ws1.column_dimensions['B'].width = 70
-        ws1.column_dimensions['C'].width = 10
-
-    # 2. KAYITSIZLAR
-    if kayıtsız_list:
-        ws2 = wb.create_sheet("KAYITSIZLAR")
-        ws2.merge_cells('A1:C1')
-        ws2['A1'] = "KAYITSIZLAR"
-        ws2['A1'].fill = header_fill
-        ws2['A1'].font = header_font
-        ws2['A1'].alignment = center_align
-        
-        ws2['A2'] = "BARKODLAR"
-        ws2['B2'] = "BARKODLAR"
-        ws2['C2'] = "BARKODLAR"
-        for cell in ['A2', 'B2', 'C2']:
-            ws2[cell].fill = subheader_fill
-            ws2[cell].font = Font(bold=True)
-            ws2[cell].alignment = center_align
-        
-        row = 3
-        col = 0
-        for barkod in kayıtsız_list:
-            col_letter = get_column_letter(col + 1)
-            ws2[f'{col_letter}{row}'] = barkod
-            ws2[f'{col_letter}{row}'].alignment = center_align
-            col += 1
-            if col == 3:
-                col = 0
+        # 1. BARKODSUZLAR
+        if barkodsuz_dict:
+            ws1 = wb.create_sheet("BARKODSUZLAR")
+            ws1.merge_cells('A1:C1')
+            ws1['A1'] = "EBEBEK BARKODSUZLAR ŞABLONU"
+            ws1['A1'].fill = header_fill
+            ws1['A1'].font = header_font
+            ws1['A1'].alignment = center_align
+            
+            ws1['A2'] = "TARİH"
+            ws1['B2'] = "İÇERİK"
+            ws1['C2'] = "ADET"
+            for cell in ['A2', 'B2', 'C2']:
+                ws1[cell].fill = subheader_fill
+                ws1[cell].font = Font(bold=True)
+                ws1[cell].alignment = center_align
+            
+            row = 3
+            for barkod, data in barkodsuz_dict.items():
+                ws1[f'A{row}'] = data['TARİH']
+                ws1[f'B{row}'] = data['İÇERİK']
+                ws1[f'C{row}'] = data['ADET']
+                ws1[f'C{row}'].alignment = center_align
                 row += 1
-        
-        for row in ws2.iter_rows(min_row=1, max_row=ws2.max_row, min_col=1, max_col=3):
-            for cell in row:
-                cell.border = border
-        
-        ws2.column_dimensions['A'].width = 18
-        ws2.column_dimensions['B'].width = 18
-        ws2.column_dimensions['C'].width = 18
+            
+            for row in ws1.iter_rows(min_row=1, max_row=ws1.max_row, min_col=1, max_col=3):
+                for cell in row:
+                    cell.border = border
+            
+            ws1.column_dimensions['A'].width = 12
+            ws1.column_dimensions['B'].width = 70
+            ws1.column_dimensions['C'].width = 10
 
-    # 3. HASARLILAR
-    if hasarli_dict:
-        ws3 = wb.create_sheet("HASARLILAR")
-        ws3.merge_cells('A1:C1')
-        ws3['A1'] = "EBEBEK HASARLILAR"
-        ws3['A1'].fill = header_fill
-        ws3['A1'].font = header_font
-        ws3['A1'].alignment = center_align
-        
-        ws3['A2'] = "TARİH"
-        ws3['B2'] = "İÇERİK"
-        ws3['C2'] = "ADET"
-        for cell in ['A2', 'B2', 'C2']:
-            ws3[cell].fill = subheader_fill
-            ws3[cell].font = Font(bold=True)
-            ws3[cell].alignment = center_align
-        
-        row = 3
-        for barkod, data in hasarli_dict.items():
-            ws3[f'A{row}'] = data['TARİH']
-            ws3[f'B{row}'] = data['İÇERİK']
-            ws3[f'C{row}'] = data['ADET']
-            ws3[f'C{row}'].alignment = center_align
-            row += 1
-        
-        for row in ws3.iter_rows(min_row=1, max_row=ws3.max_row, min_col=1, max_col=3):
-            for cell in row:
-                cell.border = border
-        
-        ws3.column_dimensions['A'].width = 12
-        ws3.column_dimensions['B'].width = 70
-        ws3.column_dimensions['C'].width = 10
+        # 2. KAYITSIZLAR
+        if kayıtsız_list:
+            ws2 = wb.create_sheet("KAYITSIZLAR")
+            ws2.merge_cells('A1:C1')
+            ws2['A1'] = "KAYITSIZLAR"
+            ws2['A1'].fill = header_fill
+            ws2['A1'].font = header_font
+            ws2['A1'].alignment = center_align
+            
+            ws2['A2'] = "BARKODLAR"
+            ws2['B2'] = "BARKODLAR"
+            ws2['C2'] = "BARKODLAR"
+            for cell in ['A2', 'B2', 'C2']:
+                ws2[cell].fill = subheader_fill
+                ws2[cell].font = Font(bold=True)
+                ws2[cell].alignment = center_align
+            
+            row = 3
+            col = 0
+            for barkod in kayıtsız_list:
+                col_letter = get_column_letter(col + 1)
+                ws2[f'{col_letter}{row}'] = barkod
+                ws2[f'{col_letter}{row}'].alignment = center_align
+                col += 1
+                if col == 3:
+                    col = 0
+                    row += 1
+            
+            for row in ws2.iter_rows(min_row=1, max_row=ws2.max_row, min_col=1, max_col=3):
+                for cell in row:
+                    cell.border = border
+            
+            ws2.column_dimensions['A'].width = 18
+            ws2.column_dimensions['B'].width = 18
+            ws2.column_dimensions['C'].width = 18
 
-    wb.save(file_name)
-    print(Fore.GREEN + f"\n    ✓ Dosya kaydedildi: '{file_name}'")
-    print(Fore.CYAN + f"\n    📊 ÖZET RAPOR:")
-    if barkodsuz_dict:
-        print(Fore.CYAN + f"       🏷️  Barkodsuzlar : {len(barkodsuz_dict)} ürün")
-    if kayıtsız_list:
-        print(Fore.CYAN + f"       ❓  Kayıtsızlar  : {len(kayıtsız_list)} barkod")
-    if hasarli_dict:
-        print(Fore.CYAN + f"       ⚠️  Hasarlılar   : {len(hasarli_dict)} ürün")
+        # 3. HASARLILAR
+        if hasarli_dict:
+            ws3 = wb.create_sheet("HASARLILAR")
+            ws3.merge_cells('A1:C1')
+            ws3['A1'] = "EBEBEK HASARLILAR"
+            ws3['A1'].fill = header_fill
+            ws3['A1'].font = header_font
+            ws3['A1'].alignment = center_align
+            
+            ws3['A2'] = "TARİH"
+            ws3['B2'] = "İÇERİK"
+            ws3['C2'] = "ADET"
+            for cell in ['A2', 'B2', 'C2']:
+                ws3[cell].fill = subheader_fill
+                ws3[cell].font = Font(bold=True)
+                ws3[cell].alignment = center_align
+            
+            row = 3
+            for barkod, data in hasarli_dict.items():
+                ws3[f'A{row}'] = data['TARİH']
+                ws3[f'B{row}'] = data['İÇERİK']
+                ws3[f'C{row}'] = data['ADET']
+                ws3[f'C{row}'].alignment = center_align
+                row += 1
+            
+            for row in ws3.iter_rows(min_row=1, max_row=ws3.max_row, min_col=1, max_col=3):
+                for cell in row:
+                    cell.border = border
+            
+            ws3.column_dimensions['A'].width = 12
+            ws3.column_dimensions['B'].width = 70
+            ws3.column_dimensions['C'].width = 10
+
+        wb.save(file_name)
+        print(Fore.GREEN + f"\n    ✓ Dosya kaydedildi: '{file_name}'")
+        print(Fore.CYAN + f"\n    📊 ÖZET RAPOR:")
+        if barkodsuz_dict:
+            print(Fore.CYAN + f"       🏷️  Barkodsuzlar : {len(barkodsuz_dict)} ürün")
+        if kayıtsız_list:
+            print(Fore.CYAN + f"       ❓  Kayıtsızlar  : {len(kayıtsız_list)} barkod")
+        if hasarli_dict:
+            print(Fore.CYAN + f"       ⚠️  Hasarlılar   : {len(hasarli_dict)} ürün")
+    
+    except Exception as e:
+        import traceback
+        error_msg = f"Excel dosyası oluşturulurken hata: {str(e)}"
+        print(Fore.RED + f"\n    ✗ {error_msg}")
+        print(traceback.format_exc())
+        raise  # Hatayı yukarı fırlat ki Flask yakalayabilsin
 
 # Menü
 def menu():
@@ -452,4 +543,5 @@ def menu():
             input(Fore.YELLOW + "\n    ⏎ Devam etmek için Enter'a basın...")
 
 # Programı başlat
-menu()
+if __name__ == '__main__':
+    menu()
